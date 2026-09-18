@@ -9,9 +9,15 @@ let package = Package(
     products: [
         .executable(name: "DuoPrototype", targets: ["DuoPrototype"])
     ],
+    dependencies: [
+        .package(path: "Vendor/Sparkle")
+    ],
     targets: [
         .executableTarget(
             name: "DuoPrototype",
+            dependencies: [
+                .product(name: "Sparkle", package: "Sparkle")
+            ],
             path: "Sources/DuoPrototype"
         )
     ]

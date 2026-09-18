@@ -24,6 +24,7 @@
 - 状态变化时平滑更新，并在充电、低电量、断网、耳机连接时显示短暂提示
 - 静音时保留音量数值，但菜单栏和预览中的四个音量点全部变灰
 - 桌面与通知中心 WidgetKit 小组件（小号、横向两种尺寸）
+- Sparkle 应用内更新；可手动检查更新，并在启用自动检查后收到新版提示
 
 ## 运行
 
@@ -44,7 +45,11 @@ open .build/DuoPrototype.app
 
 当前版本为了避免额外的定位授权，只显示 Wi‑Fi 连接状态，不读取 SSID 名称。系统输出设备会根据名称尽力识别 AirPods 或蓝牙耳机。菜单栏控制面板已经接入音量设置和系统设置快捷入口。
 
-`outputs/DuoPrototype-0.5.1-macOS-arm64.zip` 是当前构建好的 Apple Silicon 版本，最低要求 macOS 14。它使用 ad-hoc 签名，未经过 Apple 公证；首次运行时 macOS 可能要求在“系统设置 → 隐私与安全性”中选择“仍要打开”。首次运行后，在桌面或通知中心的“编辑小组件”里搜索“Duo 状态”即可添加。
+`outputs/DuoPrototype-0.5.2-macOS-arm64.zip` 是当前构建好的 Apple Silicon 版本，最低要求 macOS 14。它使用 ad-hoc 签名，未经过 Apple 公证；首次运行时 macOS 可能要求在“系统设置 → 隐私与安全性”中选择“仍要打开”。首次运行后，在桌面或通知中心的“编辑小组件”里搜索“Duo 状态”即可添加。
+
+在菜单栏面板底部点击“检查更新…”可手动检查新版。Sparkle 使用 HTTPS 更新源和 EdDSA 签名校验更新包；更新私钥保存在发布者这台 Mac 的登录钥匙串中，仓库和应用只包含公钥。首次发布带 Sparkle 的版本后，当前及更早安装的版本需要手动下载安装一次；后续版本可在应用内更新。
+
+发布更新时，先构建并压缩 `.app`，再用 Sparkle 的 `generate_appcast` 工具为 ZIP 签名并生成 `appcast.xml`。把 ZIP 上传到对应 GitHub Release，并将新生成的 `appcast.xml` 更新到仓库根目录。版本号必须递增，Release 附件文件名要和 appcast 中的文件名一致。不要把私钥提交到 GitHub。
 
 ## 下一步
 

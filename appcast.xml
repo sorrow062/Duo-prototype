@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss xmlns:atom="http://www.w3.org/2005/Atom" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+  <channel>
+    <title>DuoPrototype Updates</title>
+    <link>https://github.com/sorrow062/Duo-prototype</link>
+    <description>DuoPrototype macOS app updates</description>
+    <language>en</language>
+    <atom:link href="https://raw.githubusercontent.com/sorrow062/Duo-prototype/main/appcast.xml" rel="self" type="application/rss+xml" />
+  </channel>
+</rss>

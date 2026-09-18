@@ -21,9 +21,13 @@
 		<string>MacOSX</string>
 	</array>
 	<key>CFBundleShortVersionString</key>
-	<string>0.5.1</string>
+	<string>0.5.2</string>
 	<key>CFBundleVersion</key>
-	<string>2</string>
+	<string>3</string>
+	<key>SUPublicEDKey</key>
+	<string>f+8oc6Yx/W8q4XHmzMIpnb+60vQPmez3f8DIPXRiRdU=</string>
+	<key>SUFeedURL</key>
+	<string>https://raw.githubusercontent.com/sorrow062/Duo-prototype/main/appcast.xml</string>
 	<key>LSMinimumSystemVersion</key>
 	<string>14.0</string>
 	<key>LSUIElement</key>

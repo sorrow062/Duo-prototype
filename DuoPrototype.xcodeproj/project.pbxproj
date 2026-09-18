@@ -9,6 +9,7 @@
 		A10000000000000000000001 /* AppMain.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000001 /* AppMain.swift */; };
 		A10000000000000000000002 /* DuoWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = A20000000000000000000002 /* DuoWidget.swift */; };
 		A10000000000000000000003 /* DuoWidget.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = A20000000000000000000005 /* DuoWidget.appex */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		B10000000000000000000001 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = B20000000000000000000001 /* Sparkle */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXCopyFilesBuildPhase section */
@@ -34,7 +35,7 @@
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
-		A30000000000000000000002 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+		A30000000000000000000002 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (B10000000000000000000001 /* Sparkle in Frameworks */, ); runOnlyForDeploymentPostprocessing = 0; };
 		A30000000000000000000003 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXFrameworksBuildPhase section */
 
@@ -61,6 +62,7 @@
 			buildRules = ();
 			dependencies = (A70000000000000000000001 /* PBXTargetDependency */, );
 			name = DuoPrototype;
+			packageProductDependencies = (B20000000000000000000001 /* Sparkle */, );
 			productName = DuoPrototype;
 			productReference = A20000000000000000000006 /* DuoPrototype.app */;
 			productType = "com.apple.product-type.application";
@@ -91,6 +93,7 @@
 			productRefGroup = A40000000000000000000004 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
+			packageReferences = (B30000000000000000000001 /* XCLocalSwiftPackageReference \"Vendor/Sparkle\" */, );
 			targets = (A50000000000000000000001 /* DuoPrototype */, A50000000000000000000002 /* DuoWidget */, );
 		};
 /* End PBXProject section */
@@ -123,6 +126,21 @@
 		AB0000000000000000000007 /* Debug project */ = {isa = XCBuildConfiguration; buildSettings = {CLANG_ENABLE_MODULES = YES; MACOSX_DEPLOYMENT_TARGET = 14.0; SDKROOT = macosx; SWIFT_VERSION = 5.0; }; name = Debug; };
 		AB0000000000000000000008 /* Release project */ = {isa = XCBuildConfiguration; buildSettings = {CLANG_ENABLE_MODULES = YES; MACOSX_DEPLOYMENT_TARGET = 14.0; SDKROOT = macosx; SWIFT_VERSION = 5.0; }; name = Release; };
 /* End XCBuildConfiguration section */
+
+/* Begin XCLocalSwiftPackageReference section */
+		B30000000000000000000001 /* XCLocalSwiftPackageReference "Vendor/Sparkle" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Vendor/Sparkle;
+		};
+/* End XCLocalSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		B20000000000000000000001 /* Sparkle */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = B30000000000000000000001 /* XCLocalSwiftPackageReference "Vendor/Sparkle" */;
+			productName = Sparkle;
+		};
+/* End XCSwiftPackageProductDependency section */
 
 /* Begin XCConfigurationList section */
 		A90000000000000000000001 /* Build configuration list for PBXNativeTarget "DuoPrototype" */ = {isa = XCConfigurationList; buildConfigurations = (AB0000000000000000000003 /* Debug app */, AB0000000000000000000004 /* Release app */, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };

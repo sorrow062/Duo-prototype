@@ -3,6 +3,7 @@ import CoreAudio
 import IOKit.ps
 import Network
 import ServiceManagement
+import Sparkle
 import SwiftUI
 
 enum NetworkState: String, CaseIterable, Identifiable {
@@ -993,6 +994,12 @@ struct CompactPanel: View {
                     .buttonStyle(.borderless)
                     .foregroundStyle(.secondary)
             }
+
+            Button("检查更新…") {
+                AppUpdater.shared.checkForUpdates()
+            }
+            .disabled(!AppUpdater.shared.isConfigured)
+            .font(.caption)
         }
         .padding(16)
         .frame(width: 330)
@@ -1026,6 +1033,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+        AppUpdater.shared.start()
 
         statusItem = NSStatusBar.system.statusItem(withLength: 36)
         guard let button = statusItem.button else { return }
@@ -1094,6 +1102,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if let controlCenterObserver {
             NotificationCenter.default.removeObserver(controlCenterObserver)
         }
+    }
+}
+
+@MainActor
+final class AppUpdater {
+    static let shared = AppUpdater()
+
+    private var controller: SPUStandardUpdaterController?
+
+    var isConfigured: Bool { controller != nil }
+
+    func start() {
+        guard controller == nil,
+              let feedURL = Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") as? String,
+              feedURL.hasPrefix("https://"),
+              let publicKey = Bundle.main.object(forInfoDictionaryKey: "SUPublicEDKey") as? String,
+              !publicKey.isEmpty,
+              !publicKey.contains("REPLACE")
+        else { return }
+
+        controller = SPUStandardUpdaterController(
+            startingUpdater: true,
+            updaterDelegate: nil,
+            userDriverDelegate: nil
+        )
+    }
+
+    func checkForUpdates() {
+        controller?.checkForUpdates(nil)
     }
 }
 
