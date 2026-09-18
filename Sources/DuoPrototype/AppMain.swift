@@ -633,7 +633,7 @@ struct DuoGlyphView: View {
 
     private var isMenuBarSize: Bool { size <= 32 }
     private var ringWidth: CGFloat { isMenuBarSize ? max(1.9, size * 0.087) : size * 0.075 }
-    private var centerSymbolSize: CGFloat { size * (isMenuBarSize ? 0.31 : 0.22) }
+    private var centerSymbolSize: CGFloat { size * (isMenuBarSize ? 0.40 : 0.22) }
     private var dotSize: CGFloat { size * (isMenuBarSize ? 0.088 : 0.075) }
 
     var body: some View {
@@ -1027,14 +1027,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
 
-        statusItem = NSStatusBar.system.statusItem(withLength: 30)
+        statusItem = NSStatusBar.system.statusItem(withLength: 36)
         guard let button = statusItem.button else { return }
         button.toolTip = "Duo Prototype"
         button.target = self
         button.action = #selector(togglePopover(_:))
         button.sendAction(on: [.leftMouseUp])
         hostingView = NSHostingView(rootView: MenuBarGlyph(model: PrototypeModel.shared))
-        hostingView.frame = NSRect(x: 0, y: 0, width: 30, height: 24)
+        hostingView.frame = NSRect(x: 0, y: 0, width: 36, height: 24)
         hostingView.autoresizingMask = [.width, .height]
         button.addSubview(hostingView)
 
@@ -1102,7 +1102,7 @@ struct MenuBarGlyph: View {
 
     var body: some View {
         DuoGlyphView(model: model, size: 24)
-            .frame(width: 30, height: 24)
+            .frame(width: 36, height: 24)
     }
 }
 

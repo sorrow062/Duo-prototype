@@ -44,7 +44,7 @@ open .build/DuoPrototype.app
 
 当前版本为了避免额外的定位授权，只显示 Wi‑Fi 连接状态，不读取 SSID 名称。系统输出设备会根据名称尽力识别 AirPods 或蓝牙耳机。菜单栏控制面板已经接入音量设置和系统设置快捷入口。
 
-`outputs/DuoPrototype-0.5.0.zip` 是当前构建好的 Apple Silicon 本地原型。它使用本机 ad-hoc 签名，只用于自己的 Mac 测试，不代表 Apple Developer ID 公证版本。首次运行后，在桌面或通知中心的“编辑小组件”里搜索“Duo 状态”即可添加。
+`outputs/DuoPrototype-0.5.1-macOS-arm64.zip` 是当前构建好的 Apple Silicon 版本，最低要求 macOS 14。它使用 ad-hoc 签名，未经过 Apple 公证；首次运行时 macOS 可能要求在“系统设置 → 隐私与安全性”中选择“仍要打开”。首次运行后，在桌面或通知中心的“编辑小组件”里搜索“Duo 状态”即可添加。
 
 ## 下一步
 
