@@ -1,10 +1,20 @@
-<?xml version="1.0" encoding="UTF-8"?>
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <rss xmlns:atom="http://www.w3.org/2005/Atom" xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
-  <channel>
-    <title>DuoPrototype Updates</title>
-    <link>https://github.com/sorrow062/Duo-prototype</link>
-    <description>DuoPrototype macOS app updates</description>
-    <language>en</language>
-    <atom:link href="https://raw.githubusercontent.com/sorrow062/Duo-prototype/main/appcast.xml" rel="self" type="application/rss+xml" />
-  </channel>
+    <channel>
+        <title>DuoPrototype Updates</title>
+        <link>https://github.com/sorrow062/Duo-prototype</link>
+        <description>DuoPrototype macOS app updates</description>
+        <language>en</language>
+        <atom:link href="https://raw.githubusercontent.com/sorrow062/Duo-prototype/main/appcast.xml" rel="self" type="application/rss+xml"/>
+        <item>
+            <title>0.5.2</title>
+            <pubDate>Fri, 18 Sep 2026 13:14:02 +0800</pubDate>
+            <link>https://github.com/sorrow062/Duo-prototype</link>
+            <sparkle:version>3</sparkle:version>
+            <sparkle:shortVersionString>0.5.2</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://github.com/sorrow062/Duo-prototype/releases/download/v0.5.2/DuoPrototype-0.5.2-macOS-arm64.zip" length="1233095" type="application/octet-stream" sparkle:edSignature="Cw3DLHbPTY8bVt6/wdfoQHqHZNchOHV3wkJjx+Q1Q1+XtCb5pobF7QPhd/Ll6FsbRd+XhcjYED3yX0lGhJbGDg=="/>
+        </item>
+    </channel>
 </rss>
