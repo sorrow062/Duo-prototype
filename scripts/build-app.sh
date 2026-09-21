@@ -4,6 +4,15 @@ set -euo pipefail
 ROOT_DIR="${0:A:h}/.."
 cd "$ROOT_DIR"
 
+strip_bundle_metadata() {
+  local bundle="$1"
+  # Launch Services and Finder can attach these attributes while a bundle is
+  # copied. They invalidate ad-hoc signature verification on the final app.
+  xattr -dr com.apple.provenance "$bundle" 2>/dev/null || true
+  xattr -dr com.apple.FinderInfo "$bundle" 2>/dev/null || true
+  xattr -dr 'com.apple.fileprovider.fpfs#P' "$bundle" 2>/dev/null || true
+}
+
 xcodebuild \
   -project "$ROOT_DIR/DuoPrototype.xcodeproj" \
   -scheme DuoPrototype \
@@ -40,6 +49,7 @@ done
 # codesign may restore Finder metadata on nested Sparkle XPC bundles. Remove
 # all extended attributes recursively so Launch Services can open the final app.
 xattr -rc "$STAGED_APP" 2>/dev/null || true
+strip_bundle_metadata "$STAGED_APP"
 codesign --verify --strict "$WIDGET_DIR"
 codesign --verify --deep --strict "$STAGED_APP"
 
@@ -54,6 +64,7 @@ fi
 rm -rf "$APP_DIR"
 ditto --norsrc "$STAGED_APP" "$APP_DIR"
 xattr -rc "$APP_DIR" 2>/dev/null || true
+strip_bundle_metadata "$APP_DIR"
 codesign --verify --deep --strict "$APP_DIR"
 rm -rf "$STAGING_DIR"
 
