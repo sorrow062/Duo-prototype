@@ -169,7 +169,7 @@ final class CodexQuotaService {
             "clientInfo": [
                 "name": "duo_prototype",
                 "title": "DuoPrototype",
-                "version": "0.5.3"
+                "version": "0.5.4"
             ]
         ]])
     }
@@ -1166,17 +1166,19 @@ struct CompactPanel: View {
                 Label("Codex 额度", systemImage: "chevron.left.forwardslash.chevron.right")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                if let fiveHour = model.codexQuota.fiveHour {
-                    quotaRow(title: "5 小时", window: fiveHour)
-                }
-                if let weekly = model.codexQuota.weekly {
-                    quotaRow(title: "本周", window: weekly)
+                HStack(alignment: .center, spacing: 12) {
+                    if let fiveHour = model.codexQuota.fiveHour {
+                        quotaCard(title: "5 小时", centerText: "5", window: fiveHour)
+                    }
+                    if let weekly = model.codexQuota.weekly {
+                        quotaCard(title: "本周", centerText: "all", window: weekly)
+                    }
                 }
                 if model.codexQuota.fiveHour == nil && model.codexQuota.weekly == nil {
                     Text(model.codexQuota.status)
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
-                } else {
+                } else if model.codexQuota.status != "已同步" {
                     Text(model.codexQuota.status)
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
@@ -1284,7 +1286,7 @@ struct CompactPanel: View {
             .font(.caption)
         }
         .padding(16)
-        .frame(width: 330)
+        .frame(width: 350)
     }
 
     private func compactRow(_ title: String, _ detail: String, _ symbol: String, action: (() -> Void)? = nil) -> some View {
@@ -1304,19 +1306,51 @@ struct CompactPanel: View {
         }
     }
 
-    private func quotaRow(title: String, window: CodexQuotaWindow) -> some View {
-        HStack(spacing: 8) {
-            Text(title)
-                .font(.caption)
-                .frame(width: 48, alignment: .leading)
-            ProgressView(value: Double(window.remainingPercent), total: 100)
-                .tint(window.remainingPercent <= 15 ? .orange : .accentColor)
-            Text("剩余 (window.remainingPercent)%")
-                .font(.caption)
-                .monospacedDigit()
-                .frame(width: 62, alignment: .trailing)
+    private func quotaCard(title: String, centerText: String, window: CodexQuotaWindow) -> some View {
+        HStack(spacing: 7) {
+            ZStack {
+                QuotaRingShape(progress: 1)
+                    .stroke(.primary.opacity(0.14), style: StrokeStyle(lineWidth: 5, lineCap: .round))
+                QuotaRingShape(progress: Double(window.remainingPercent) / 100)
+                    .stroke(window.remainingPercent <= 15 ? .orange : .accentColor,
+                            style: StrokeStyle(lineWidth: 5, lineCap: .round))
+                Text(centerText)
+                    .font(.system(size: centerText == "all" ? 10 : 15, weight: .bold, design: .rounded))
+                    .monospacedDigit()
+            }
+            .frame(width: 50, height: 50)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text("剩余 (window.remainingPercent)%")
+                    .font(.caption.weight(.semibold))
+                    .monospacedDigit()
+                Text(window.resetText)
+                    .font(.system(size: 9))
+                    .foregroundStyle(.tertiary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.65)
+            }
         }
         .help(window.resetText)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct QuotaRingShape: Shape {
+    var progress: Double
+
+    func path(in rect: CGRect) -> Path {
+        let inset = 4.0
+        let radius = min(rect.width, rect.height) / 2 - inset
+        let center = CGPoint(x: rect.midX, y: rect.midY)
+        let start = Angle.degrees(-220)
+        let end = start.degrees + 260 * min(max(progress, 0), 1)
+        var path = Path()
+        path.addArc(center: center, radius: radius, startAngle: start, endAngle: .degrees(end), clockwise: false)
+        return path
     }
 }
 

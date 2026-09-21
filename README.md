@@ -48,7 +48,7 @@ open .build/DuoPrototype.app
 
 如果本机安装并登录了 Codex，菜单栏控制面板中的“Codex 额度”会通过本机 codex app-server 读取 5 小时和每周额度。DuoPrototype 不读取、保存或上传 Codex 登录令牌；没有 Codex、尚未登录，或使用 API Key 时会显示相应提示。额度接口只返回服务实际提供的窗口，无法返回的窗口不会被估算。
 
-`outputs/DuoPrototype-0.5.3-macOS-arm64.zip` 是当前构建好的 Apple Silicon 版本，最低要求 macOS 14。它使用 ad-hoc 签名，未经过 Apple 公证；首次运行时 macOS 可能要求在“系统设置 → 隐私与安全性”中选择“仍要打开”。首次运行后，在桌面或通知中心的“编辑小组件”里搜索“Duo 状态”即可添加。
+`outputs/DuoPrototype-0.5.4-macOS-arm64.zip` 是当前构建好的 Apple Silicon 版本，最低要求 macOS 14。它使用 ad-hoc 签名，未经过 Apple 公证；首次运行时 macOS 可能要求在“系统设置 → 隐私与安全性”中选择“仍要打开”。首次运行后，在桌面或通知中心的“编辑小组件”里搜索“Duo 状态”即可添加。
 
 在菜单栏面板底部点击“检查更新…”可手动检查新版。Sparkle 使用 HTTPS 更新源和 EdDSA 签名校验更新包；更新私钥保存在发布者这台 Mac 的登录钥匙串中，仓库和应用只包含公钥。首次发布带 Sparkle 的版本后，当前及更早安装的版本需要手动下载安装一次；后续版本可在应用内更新。
 

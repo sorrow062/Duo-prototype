@@ -21,9 +21,9 @@
 		<string>MacOSX</string>
 	</array>
 	<key>CFBundleShortVersionString</key>
-	<string>0.5.3</string>
+	<string>0.5.4</string>
 	<key>CFBundleVersion</key>
-	<string>4</string>
+	<string>5</string>
 	<key>SUPublicEDKey</key>
 	<string>f+8oc6Yx/W8q4XHmzMIpnb+60vQPmez3f8DIPXRiRdU=</string>
 	<key>SUFeedURL</key>
