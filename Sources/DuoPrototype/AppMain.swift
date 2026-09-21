@@ -1,5 +1,6 @@
 import AppKit
 import CoreAudio
+import Foundation
 import IOKit.ps
 import Network
 import ServiceManagement
@@ -80,6 +81,232 @@ struct ResourceMetrics: Equatable {
     }
 }
 
+struct CodexQuotaWindow: Equatable {
+    let usedPercent: Int
+    let windowDurationMinutes: Int
+    let resetsAt: Date?
+
+    var remainingPercent: Int { max(0, min(100, 100 - usedPercent)) }
+
+    var resetText: String {
+        guard let resetsAt else { return "重置时间未知" }
+        let seconds = max(0, Int(resetsAt.timeIntervalSinceNow.rounded()))
+        if seconds < 60 { return "即将重置" }
+        let minutes = seconds / 60
+        if minutes < 60 { return "\(minutes) 分钟后重置" }
+        let hours = minutes / 60
+        if hours < 24 {
+            let remainder = minutes % 60
+            return remainder > 0 ? "\(hours) 小时 \(remainder) 分钟后重置" : "\(hours) 小时后重置"
+        }
+        let days = hours / 24
+        return "\(days) 天后重置"
+    }
+}
+
+struct CodexQuota: Equatable {
+    var planType: String?
+    var fiveHour: CodexQuotaWindow?
+    var weekly: CodexQuotaWindow?
+    var status = "正在连接 Codex…"
+    var lastUpdated: Date?
+}
+
+/// Small JSON-RPC client for the locally installed Codex app-server.
+/// It never reads or uploads credential files; authentication stays inside Codex.
+final class CodexQuotaService {
+    var onUpdate: ((CodexQuota) -> Void)?
+
+    private let ioQueue = DispatchQueue(label: "com.local.duo-prototype.codex-quota")
+    private var process: Process?
+    private var inputPipe: Pipe?
+    private var outputPipe: Pipe?
+    private var lineBuffer = Data()
+    private var nextRequestID = 1
+    private var didInitialize = false
+    private var planType: String?
+    private var authType: String?
+
+    func start() {
+        guard process == nil else { return }
+        guard let executable = findCodexExecutable() else {
+            publish(CodexQuota(status: "未检测到本机 Codex"))
+            return
+        }
+
+        let input = Pipe()
+        let output = Pipe()
+        let child = Process()
+        child.executableURL = executable
+        child.arguments = ["app-server", "--listen", "stdio://"]
+        child.standardInput = input
+        child.standardOutput = output
+        child.standardError = FileHandle.nullDevice
+        output.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            guard !data.isEmpty else { return }
+            self?.ioQueue.async { [weak self] in self?.consume(data) }
+        }
+        child.terminationHandler = { [weak self] _ in
+            self?.ioQueue.async { [weak self] in
+                self?.process = nil
+                self?.didInitialize = false
+                self?.publish(CodexQuota(status: "Codex 已退出"))
+            }
+        }
+
+        do {
+            try child.run()
+        } catch {
+            publish(CodexQuota(status: "无法启动 Codex"))
+            return
+        }
+
+        process = child
+        inputPipe = input
+        outputPipe = output
+        send(["method": "initialize", "id": nextID(), "params": [
+            "clientInfo": [
+                "name": "duo_prototype",
+                "title": "DuoPrototype",
+                "version": "0.5.3"
+            ]
+        ]])
+    }
+
+    func refresh() {
+        guard process != nil, didInitialize else {
+            start()
+            return
+        }
+        send(["method": "account/read", "id": nextID(), "params": ["refreshToken": true]])
+        send(["method": "account/rateLimits/read", "id": nextID()])
+    }
+
+    func stop() {
+        ioQueue.async { [weak self] in
+            self?.outputPipe?.fileHandleForReading.readabilityHandler = nil
+            self?.process?.terminate()
+            self?.process = nil
+            self?.inputPipe = nil
+            self?.outputPipe = nil
+        }
+    }
+
+    private func findCodexExecutable() -> URL? {
+        let candidates = [
+            "/Applications/ChatGPT.app/Contents/Resources/codex",
+            "/opt/homebrew/bin/codex",
+            "/usr/local/bin/codex",
+            "/usr/bin/codex"
+        ]
+        if let path = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) {
+            return URL(fileURLWithPath: path)
+        }
+        let paths = (ProcessInfo.processInfo.environment["PATH"] ?? "")
+            .split(separator: ":")
+            .map(String.init)
+        return paths
+            .map { "\($0)/codex" }
+            .first(where: { FileManager.default.isExecutableFile(atPath: $0) })
+            .map(URL.init(fileURLWithPath:))
+    }
+
+    private func nextID() -> Int {
+        defer { nextRequestID += 1 }
+        return nextRequestID
+    }
+
+    private func send(_ message: [String: Any]) {
+        guard let data = try? JSONSerialization.data(withJSONObject: message) else { return }
+        var payload = data
+        payload.append(0x0A)
+        ioQueue.async { [weak self] in
+            self?.inputPipe?.fileHandleForWriting.write(payload)
+        }
+    }
+
+    private func consume(_ data: Data) {
+        lineBuffer.append(data)
+        while let newline = lineBuffer.firstIndex(of: 0x0A) {
+            let line = lineBuffer.subdata(in: 0..<newline)
+            lineBuffer.removeSubrange(0...newline)
+            guard !line.isEmpty,
+                  let object = try? JSONSerialization.jsonObject(with: line),
+                  let message = object as? [String: Any] else { continue }
+            handle(message)
+        }
+    }
+
+    private func handle(_ message: [String: Any]) {
+        if let method = message["method"] as? String, method == "account/rateLimits/updated",
+           let params = message["params"] as? [String: Any],
+           let limits = params["rateLimits"] as? [String: Any] {
+            publishQuota(from: ["rateLimits": limits])
+            return
+        }
+
+        guard let id = (message["id"] as? NSNumber)?.intValue else { return }
+        if id == 1 {
+            didInitialize = true
+            send(["method": "initialized", "params": [:]])
+            refresh()
+        } else if let result = message["result"] as? [String: Any] {
+            if result["account"] is [String: Any] {
+                parseAccount(result)
+            }
+            if result["rateLimits"] is [String: Any] || result["rateLimitsByLimitId"] is [String: Any] {
+                publishQuota(from: result)
+            }
+        }
+    }
+
+    private func parseAccount(_ result: [String: Any]) {
+        guard let account = result["account"] as? [String: Any] else { return }
+        authType = account["type"] as? String
+        planType = account["planType"] as? String
+    }
+
+    private func publishQuota(from result: [String: Any]) {
+        var windows: [CodexQuotaWindow] = []
+        if let buckets = result["rateLimitsByLimitId"] as? [String: Any] {
+            for (_, value) in buckets {
+                guard let bucket = value as? [String: Any] else { continue }
+                windows.append(contentsOf: parseWindows(bucket))
+            }
+        }
+        if windows.isEmpty, let bucket = result["rateLimits"] as? [String: Any] {
+            windows = parseWindows(bucket)
+        }
+
+        let fiveHour = windows.first { abs($0.windowDurationMinutes - 5 * 60) <= 30 }
+        let weekly = windows.first { abs($0.windowDurationMinutes - 7 * 24 * 60) <= 24 * 60 }
+        let status: String
+        if fiveHour == nil && weekly == nil {
+            status = authType == "apiKey" ? "API Key 模式没有 ChatGPT 额度" : "当前未返回 5 小时/每周额度"
+        } else {
+            status = "已同步"
+        }
+        publish(CodexQuota(planType: planType, fiveHour: fiveHour, weekly: weekly, status: status, lastUpdated: Date()))
+    }
+
+    private func parseWindows(_ bucket: [String: Any]) -> [CodexQuotaWindow] {
+        ["primary", "secondary"].compactMap { key in
+            guard let window = bucket[key] as? [String: Any],
+                  let used = (window["usedPercent"] as? NSNumber)?.intValue,
+                  let minutes = (window["windowDurationMins"] as? NSNumber)?.intValue else { return nil }
+            let reset = (window["resetsAt"] as? NSNumber).map { Date(timeIntervalSince1970: $0.doubleValue) }
+            return CodexQuotaWindow(usedPercent: used, windowDurationMinutes: minutes, resetsAt: reset)
+        }
+    }
+
+    private func publish(_ quota: CodexQuota) {
+        Task { @MainActor [weak self] in
+            self?.onUpdate?(quota)
+        }
+    }
+}
+
 struct OutputDevice: Identifiable, Equatable {
     let id: AudioDeviceID
     let name: String
@@ -107,15 +334,25 @@ final class PrototypeModel: ObservableObject {
     @Published var showPercentage = true
     @Published var lastEvent: StatusEvent?
     @Published var metrics = ResourceMetrics()
+    @Published var codexQuota = CodexQuota()
 
     private let networkMonitor = NWPathMonitor()
     private let networkQueue = DispatchQueue(label: "com.local.duo-prototype.network")
+    private var codexQuotaService: CodexQuotaService?
     private var refreshTimer: Timer?
     private var wakeObserver: NSObjectProtocol?
     private var previousCPUTicks: [UInt64] = []
+    private var lastCodexQuotaRefresh = Date.distantPast
 
     init(startMonitoring: Bool = true) {
-        if startMonitoring { self.startMonitoring() }
+        if startMonitoring {
+            let service = CodexQuotaService()
+            service.onUpdate = { [weak self] quota in
+                self?.codexQuota = quota
+            }
+            codexQuotaService = service
+            self.startMonitoring()
+        }
     }
 
     var batteryPercentage: Int { Int((battery * 100).rounded()) }
@@ -156,6 +393,10 @@ final class PrototypeModel: ObservableObject {
         readPower()
         readAudio()
         readSystemMetrics()
+        if Date().timeIntervalSince(lastCodexQuotaRefresh) >= 60 {
+            lastCodexQuotaRefresh = Date()
+            codexQuotaService?.refresh()
+        }
         lastUpdated = Date()
 
         if !previousCharging && isCharging {
@@ -540,6 +781,17 @@ final class PrototypeModel: ObservableObject {
         }
     }
 
+    func openCodexUsage() {
+        if let url = URL(string: "https://chatgpt.com/codex/settings/usage") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    func refreshCodexQuota() {
+        lastCodexQuotaRefresh = Date()
+        codexQuotaService?.refresh()
+    }
+
     func toggleLaunchAtLogin(_ enabled: Bool) {
         do {
             if enabled {
@@ -582,6 +834,7 @@ final class PrototypeModel: ObservableObject {
         if let wakeObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
         }
+        codexQuotaService?.stop()
     }
 }
 
@@ -909,6 +1162,35 @@ struct CompactPanel: View {
                 .toggleStyle(.switch)
             }
 
+            VStack(alignment: .leading, spacing: 8) {
+                Label("Codex 额度", systemImage: "chevron.left.forwardslash.chevron.right")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if let fiveHour = model.codexQuota.fiveHour {
+                    quotaRow(title: "5 小时", window: fiveHour)
+                }
+                if let weekly = model.codexQuota.weekly {
+                    quotaRow(title: "本周", window: weekly)
+                }
+                if model.codexQuota.fiveHour == nil && model.codexQuota.weekly == nil {
+                    Text(model.codexQuota.status)
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                } else {
+                    Text(model.codexQuota.status)
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+                HStack(spacing: 10) {
+                    Button("刷新额度") { model.refreshCodexQuota() }
+                        .buttonStyle(.borderless)
+                        .font(.caption)
+                    Button("打开用量页") { model.openCodexUsage() }
+                        .buttonStyle(.borderless)
+                        .font(.caption)
+                }
+            }
+
             VStack(alignment: .leading, spacing: 7) {
                 HStack {
                     Label("音量", systemImage: model.isMuted ? "speaker.slash" : "speaker.wave.2")
@@ -1020,6 +1302,21 @@ struct CompactPanel: View {
                     .foregroundStyle(.secondary)
             }
         }
+    }
+
+    private func quotaRow(title: String, window: CodexQuotaWindow) -> some View {
+        HStack(spacing: 8) {
+            Text(title)
+                .font(.caption)
+                .frame(width: 48, alignment: .leading)
+            ProgressView(value: Double(window.remainingPercent), total: 100)
+                .tint(window.remainingPercent <= 15 ? .orange : .accentColor)
+            Text("剩余 (window.remainingPercent)%")
+                .font(.caption)
+                .monospacedDigit()
+                .frame(width: 62, alignment: .trailing)
+        }
+        .help(window.resetText)
     }
 }
 

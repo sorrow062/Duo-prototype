@@ -37,6 +37,9 @@ for package in "$STAGED_APP" "$WIDGET_DIR"; do
   xattr -d com.apple.FinderInfo "$package" 2>/dev/null || true
   xattr -d 'com.apple.fileprovider.fpfs#P' "$package" 2>/dev/null || true
 done
+# codesign may restore Finder metadata on nested Sparkle XPC bundles. Remove
+# all extended attributes recursively so Launch Services can open the final app.
+xattr -rc "$STAGED_APP" 2>/dev/null || true
 codesign --verify --strict "$WIDGET_DIR"
 codesign --verify --deep --strict "$STAGED_APP"
 
@@ -50,6 +53,8 @@ fi
 
 rm -rf "$APP_DIR"
 ditto --norsrc "$STAGED_APP" "$APP_DIR"
+xattr -rc "$APP_DIR" 2>/dev/null || true
+codesign --verify --deep --strict "$APP_DIR"
 rm -rf "$STAGING_DIR"
 
 echo "Built $APP_DIR with WidgetKit extension"
