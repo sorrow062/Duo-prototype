@@ -1,6 +1,8 @@
 import AppKit
 import CoreAudio
 import Foundation
+import IOBluetooth
+import IOKit
 import IOKit.ps
 import Network
 import ServiceManagement
@@ -81,238 +83,250 @@ struct ResourceMetrics: Equatable {
     }
 }
 
-struct CodexQuotaWindow: Equatable {
-    let usedPercent: Int
-    let windowDurationMinutes: Int
-    let resetsAt: Date?
-
-    var remainingPercent: Int { max(0, min(100, 100 - usedPercent)) }
-
-    var resetText: String {
-        guard let resetsAt else { return "重置时间未知" }
-        let seconds = max(0, Int(resetsAt.timeIntervalSinceNow.rounded()))
-        if seconds < 60 { return "即将重置" }
-        let minutes = seconds / 60
-        if minutes < 60 { return "\(minutes) 分钟后重置" }
-        let hours = minutes / 60
-        if hours < 24 {
-            let remainder = minutes % 60
-            return remainder > 0 ? "\(hours) 小时 \(remainder) 分钟后重置" : "\(hours) 小时后重置"
-        }
-        let days = hours / 24
-        return "\(days) 天后重置"
-    }
-}
-
-struct CodexQuota: Equatable {
-    var planType: String?
-    var fiveHour: CodexQuotaWindow?
-    var weekly: CodexQuotaWindow?
-    var status = "正在连接 Codex…"
-    var lastUpdated: Date?
-}
-
-/// Small JSON-RPC client for the locally installed Codex app-server.
-/// It never reads or uploads credential files; authentication stays inside Codex.
-final class CodexQuotaService {
-    var onUpdate: ((CodexQuota) -> Void)?
-
-    private let ioQueue = DispatchQueue(label: "com.local.duo-prototype.codex-quota")
-    private var process: Process?
-    private var inputPipe: Pipe?
-    private var outputPipe: Pipe?
-    private var lineBuffer = Data()
-    private var nextRequestID = 1
-    private var didInitialize = false
-    private var planType: String?
-    private var authType: String?
-
-    func start() {
-        guard process == nil else { return }
-        guard let executable = findCodexExecutable() else {
-            publish(CodexQuota(status: "未检测到本机 Codex"))
-            return
-        }
-
-        let input = Pipe()
-        let output = Pipe()
-        let child = Process()
-        child.executableURL = executable
-        child.arguments = ["app-server", "--listen", "stdio://"]
-        child.standardInput = input
-        child.standardOutput = output
-        child.standardError = FileHandle.nullDevice
-        output.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            guard !data.isEmpty else { return }
-            self?.ioQueue.async { [weak self] in self?.consume(data) }
-        }
-        child.terminationHandler = { [weak self] _ in
-            self?.ioQueue.async { [weak self] in
-                self?.process = nil
-                self?.didInitialize = false
-                self?.publish(CodexQuota(status: "Codex 已退出"))
-            }
-        }
-
-        do {
-            try child.run()
-        } catch {
-            publish(CodexQuota(status: "无法启动 Codex"))
-            return
-        }
-
-        process = child
-        inputPipe = input
-        outputPipe = output
-        send(["method": "initialize", "id": nextID(), "params": [
-            "clientInfo": [
-                "name": "duo_prototype",
-                "title": "DuoPrototype",
-                "version": "0.5.4"
-            ]
-        ]])
-    }
-
-    func refresh() {
-        guard process != nil, didInitialize else {
-            start()
-            return
-        }
-        send(["method": "account/read", "id": nextID(), "params": ["refreshToken": true]])
-        send(["method": "account/rateLimits/read", "id": nextID()])
-    }
-
-    func stop() {
-        ioQueue.async { [weak self] in
-            self?.outputPipe?.fileHandleForReading.readabilityHandler = nil
-            self?.process?.terminate()
-            self?.process = nil
-            self?.inputPipe = nil
-            self?.outputPipe = nil
-        }
-    }
-
-    private func findCodexExecutable() -> URL? {
-        let candidates = [
-            "/Applications/ChatGPT.app/Contents/Resources/codex",
-            "/opt/homebrew/bin/codex",
-            "/usr/local/bin/codex",
-            "/usr/bin/codex"
-        ]
-        if let path = candidates.first(where: { FileManager.default.isExecutableFile(atPath: $0) }) {
-            return URL(fileURLWithPath: path)
-        }
-        let paths = (ProcessInfo.processInfo.environment["PATH"] ?? "")
-            .split(separator: ":")
-            .map(String.init)
-        return paths
-            .map { "\($0)/codex" }
-            .first(where: { FileManager.default.isExecutableFile(atPath: $0) })
-            .map(URL.init(fileURLWithPath:))
-    }
-
-    private func nextID() -> Int {
-        defer { nextRequestID += 1 }
-        return nextRequestID
-    }
-
-    private func send(_ message: [String: Any]) {
-        guard let data = try? JSONSerialization.data(withJSONObject: message) else { return }
-        var payload = data
-        payload.append(0x0A)
-        ioQueue.async { [weak self] in
-            self?.inputPipe?.fileHandleForWriting.write(payload)
-        }
-    }
-
-    private func consume(_ data: Data) {
-        lineBuffer.append(data)
-        while let newline = lineBuffer.firstIndex(of: 0x0A) {
-            let line = lineBuffer.subdata(in: 0..<newline)
-            lineBuffer.removeSubrange(0...newline)
-            guard !line.isEmpty,
-                  let object = try? JSONSerialization.jsonObject(with: line),
-                  let message = object as? [String: Any] else { continue }
-            handle(message)
-        }
-    }
-
-    private func handle(_ message: [String: Any]) {
-        if let method = message["method"] as? String, method == "account/rateLimits/updated",
-           let params = message["params"] as? [String: Any],
-           let limits = params["rateLimits"] as? [String: Any] {
-            publishQuota(from: ["rateLimits": limits])
-            return
-        }
-
-        guard let id = (message["id"] as? NSNumber)?.intValue else { return }
-        if id == 1 {
-            didInitialize = true
-            send(["method": "initialized", "params": [:]])
-            refresh()
-        } else if let result = message["result"] as? [String: Any] {
-            if result["account"] is [String: Any] {
-                parseAccount(result)
-            }
-            if result["rateLimits"] is [String: Any] || result["rateLimitsByLimitId"] is [String: Any] {
-                publishQuota(from: result)
-            }
-        }
-    }
-
-    private func parseAccount(_ result: [String: Any]) {
-        guard let account = result["account"] as? [String: Any] else { return }
-        authType = account["type"] as? String
-        planType = account["planType"] as? String
-    }
-
-    private func publishQuota(from result: [String: Any]) {
-        var windows: [CodexQuotaWindow] = []
-        if let buckets = result["rateLimitsByLimitId"] as? [String: Any] {
-            for (_, value) in buckets {
-                guard let bucket = value as? [String: Any] else { continue }
-                windows.append(contentsOf: parseWindows(bucket))
-            }
-        }
-        if windows.isEmpty, let bucket = result["rateLimits"] as? [String: Any] {
-            windows = parseWindows(bucket)
-        }
-
-        let fiveHour = windows.first { abs($0.windowDurationMinutes - 5 * 60) <= 30 }
-        let weekly = windows.first { abs($0.windowDurationMinutes - 7 * 24 * 60) <= 24 * 60 }
-        let status: String
-        if fiveHour == nil && weekly == nil {
-            status = authType == "apiKey" ? "API Key 模式没有 ChatGPT 额度" : "当前未返回 5 小时/每周额度"
-        } else {
-            status = "已同步"
-        }
-        publish(CodexQuota(planType: planType, fiveHour: fiveHour, weekly: weekly, status: status, lastUpdated: Date()))
-    }
-
-    private func parseWindows(_ bucket: [String: Any]) -> [CodexQuotaWindow] {
-        ["primary", "secondary"].compactMap { key in
-            guard let window = bucket[key] as? [String: Any],
-                  let used = (window["usedPercent"] as? NSNumber)?.intValue,
-                  let minutes = (window["windowDurationMins"] as? NSNumber)?.intValue else { return nil }
-            let reset = (window["resetsAt"] as? NSNumber).map { Date(timeIntervalSince1970: $0.doubleValue) }
-            return CodexQuotaWindow(usedPercent: used, windowDurationMinutes: minutes, resetsAt: reset)
-        }
-    }
-
-    private func publish(_ quota: CodexQuota) {
-        Task { @MainActor [weak self] in
-            self?.onUpdate?(quota)
-        }
-    }
-}
-
 struct OutputDevice: Identifiable, Equatable {
     let id: AudioDeviceID
     let name: String
     let isBluetooth: Bool
 
     var symbol: String { isBluetooth ? "dot.radiowaves.left.and.right" : "speaker.wave.2" }
+}
+
+/// Battery for the current Bluetooth output. Left/right come from AirPods-style
+/// readings; `single` is one percentage for headsets that report only one level.
+private struct BluetoothHeadphoneBattery: Equatable {
+    var left: Int?
+    var right: Int?
+    var single: Int?
+
+    var label: String? {
+        switch (left, right, single) {
+        case let (left?, right?, _):
+            return "左 \(left)% · 右 \(right)%"
+        case let (left?, nil, _):
+            return "左 \(left)%"
+        case let (nil, right?, _):
+            return "右 \(right)%"
+        case let (nil, nil, single?):
+            return "\(single)%"
+        default:
+            return nil
+        }
+    }
+}
+
+/// Reads headphone battery for a Core Audio output that is already known to be Bluetooth.
+/// AirPods and Beats expose left/right/single levels on IOBluetoothDevice. Other headsets
+/// usually publish BatteryPercent on AppleDeviceManagementHIDEventService.
+private enum BluetoothHeadphoneBatteryReader {
+    static func label(forDeviceName name: String, address: String?) -> String? {
+        if let label = bluetoothDeviceBattery(name: name, address: address)?.label {
+            return label
+        }
+        return registryBattery(name: name, address: address)?.label
+    }
+
+    private static func bluetoothDeviceBattery(name: String, address: String?) -> BluetoothHeadphoneBattery? {
+        guard let paired = IOBluetoothDevice.pairedDevices() else { return nil }
+        let connected = paired.compactMap { $0 as? IOBluetoothDevice }.filter { $0.isConnected() }
+        guard let matched = bestDevice(in: connected, name: name, address: address) else { return nil }
+        let reading = BluetoothHeadphoneBattery(
+            left: percent(matched, "batteryPercentLeft"),
+            right: percent(matched, "batteryPercentRight"),
+            single: percent(matched, "batteryPercentSingle")
+                ?? percent(matched, "batteryPercentCombined")
+                ?? percent(matched, "headsetBattery")
+        )
+        return reading.label == nil ? nil : reading
+    }
+
+    /// Private IOBluetooth headphone getters. Zero means "no reading" for these fields.
+    private static func percent(_ device: IOBluetoothDevice, _ key: String) -> Int? {
+        let selector = NSSelectorFromString(key)
+        guard device.responds(to: selector) else { return nil }
+        guard let number = device.value(forKey: key) as? NSNumber else { return nil }
+        let value = number.intValue
+        guard (1...100).contains(value) else { return nil }
+        return value
+    }
+
+    private static func registryBattery(name: String, address: String?) -> BluetoothHeadphoneBattery? {
+        let services = ["AppleDeviceManagementHIDEventService", "AppleHSBluetoothDevice"]
+        let candidates = services.flatMap(registryEntries(of:))
+        if let address,
+           let match = candidates.first(where: { macAddressesMatch(address, $0.address) && $0.battery.label != nil }) {
+            return match.battery
+        }
+        return candidates
+            .filter { bluetoothNamesMatch(name, $0.name) && $0.battery.label != nil }
+            .max { lhs, rhs in
+                let audio = normalizeBluetoothName(name)
+                let leftExact = normalizeBluetoothName(lhs.name) == audio
+                let rightExact = normalizeBluetoothName(rhs.name) == audio
+                if leftExact != rightExact { return rightExact }
+                return lhs.name.count < rhs.name.count
+            }?
+            .battery
+    }
+
+    private static func registryEntries(of className: String) -> [(name: String, address: String?, battery: BluetoothHeadphoneBattery)] {
+        var iterator: io_iterator_t = 0
+        guard IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching(className), &iterator) == KERN_SUCCESS else {
+            return []
+        }
+        defer { IOObjectRelease(iterator) }
+
+        var results: [(name: String, address: String?, battery: BluetoothHeadphoneBattery)] = []
+        while case let entry = IOIteratorNext(iterator), entry != 0 {
+            defer { IOObjectRelease(entry) }
+            guard let props = copyRegistryProperties(entry) else { continue }
+            let battery = BluetoothHeadphoneBattery(
+                left: registryPercent(props, "BatteryPercentLeft"),
+                right: registryPercent(props, "BatteryPercentRight"),
+                single: registryPercent(props, "BatteryPercent")
+                    ?? registryPercent(props, "BatteryPercentSingle")
+                    ?? registryPercent(props, "BatteryPercentCombined")
+            )
+            guard battery.label != nil else { continue }
+            let identity = registryIdentity(entry, props: props)
+            results.append((identity.name, identity.address, battery))
+        }
+        return results
+    }
+
+    private static func registryIdentity(_ entry: io_registry_entry_t, props: [String: Any]) -> (name: String, address: String?) {
+        var name = registryName(props) ?? ""
+        var address = registryAddress(props)
+        guard name.isEmpty || address == nil else { return (name, address) }
+
+        var current = entry
+        var owned: io_registry_entry_t = 0
+        defer { if owned != 0 { IOObjectRelease(owned) } }
+        for _ in 0..<4 {
+            var parent: io_registry_entry_t = 0
+            guard IORegistryEntryGetParentEntry(current, kIOServicePlane, &parent) == KERN_SUCCESS, parent != 0 else { break }
+            if owned != 0 { IOObjectRelease(owned) }
+            owned = parent
+            current = parent
+            guard let parentProps = copyRegistryProperties(parent) else { continue }
+            if name.isEmpty, let parentName = registryName(parentProps) { name = parentName }
+            if address == nil { address = registryAddress(parentProps) }
+            if !name.isEmpty, address != nil { break }
+        }
+        return (name, address)
+    }
+
+    private static func copyRegistryProperties(_ entry: io_registry_entry_t) -> [String: Any]? {
+        var properties: Unmanaged<CFMutableDictionary>?
+        guard IORegistryEntryCreateCFProperties(entry, &properties, kCFAllocatorDefault, 0) == KERN_SUCCESS,
+              let properties else { return nil }
+        return properties.takeRetainedValue() as? [String: Any]
+    }
+
+    private static func registryName(_ props: [String: Any]) -> String? {
+        for key in ["Product", "ProductName", "DeviceName", "USB Product Name", "name"] {
+            if let value = props[key] as? String, !value.isEmpty { return value }
+        }
+        return nil
+    }
+
+    private static func registryAddress(_ props: [String: Any]) -> String? {
+        for key in ["BD_ADDR", "DeviceAddress", "Address", "device address"] {
+            if let text = props[key] as? String, let address = normalizedMACAddress(in: text) {
+                return address
+            }
+            if let data = props[key] as? Data, data.count >= 6 {
+                return data.prefix(6).map { String(format: "%02X", $0) }.joined(separator: "-")
+            }
+        }
+        return nil
+    }
+
+    private static func registryPercent(_ props: [String: Any], _ key: String) -> Int? {
+        let raw: Int?
+        switch props[key] {
+        case let value as Int:
+            raw = value
+        case let value as NSNumber:
+            raw = value.intValue
+        case let value as String:
+            raw = Int(value.filter(\.isNumber))
+        default:
+            raw = nil
+        }
+        guard let raw, (1...100).contains(raw) else { return nil }
+        return raw
+    }
+
+    private static func bestDevice(in devices: [IOBluetoothDevice], name: String, address: String?) -> IOBluetoothDevice? {
+        if let address,
+           let match = devices.first(where: { device in
+               let deviceAddress = device.value(forKey: "addressString") as? String ?? ""
+               return macAddressesMatch(address, normalizedMACAddress(in: deviceAddress))
+           }) {
+            return match
+        }
+        return devices
+            .filter { bluetoothNamesMatch(name, $0.value(forKey: "name") as? String ?? "") }
+            .max { lhs, rhs in
+                let audio = normalizeBluetoothName(name)
+                let leftName = normalizeBluetoothName(lhs.value(forKey: "name") as? String ?? "")
+                let rightName = normalizeBluetoothName(rhs.value(forKey: "name") as? String ?? "")
+                let leftExact = leftName == audio
+                let rightExact = rightName == audio
+                if leftExact != rightExact { return rightExact }
+                return leftName.count < rightName.count
+            }
+    }
+
+    private static func bluetoothNamesMatch(_ audioName: String, _ deviceName: String) -> Bool {
+        let audio = normalizeBluetoothName(audioName)
+        let device = normalizeBluetoothName(deviceName)
+        guard audio.count >= 3, device.count >= 3 else { return false }
+        if audio == device { return true }
+        let shorter = min(audio.count, device.count)
+        let longer = max(audio.count, device.count)
+        guard shorter * 2 >= longer else { return false }
+        return audio.contains(device) || device.contains(audio)
+    }
+
+    private static func normalizeBluetoothName(_ value: String) -> String {
+        value.lowercased().filter { $0.isLetter || $0.isNumber }
+    }
+
+    private static func macAddressesMatch(_ lhs: String?, _ rhs: String?) -> Bool {
+        guard let lhs, let rhs else { return false }
+        if lhs == rhs { return true }
+        let reversed = lhs.split(separator: "-").reversed().joined(separator: "-")
+        return reversed == rhs
+    }
+
+    static func normalizedMACAddress(in text: String) -> String? {
+        let chars = Array(text.uppercased())
+        let hex = Set("0123456789ABCDEF")
+        guard chars.count >= 17 else { return nil }
+        for start in 0...(chars.count - 17) {
+            var parts: [String] = []
+            var index = start
+            var matched = true
+            for part in 0..<6 {
+                guard index + 1 < chars.count, hex.contains(chars[index]), hex.contains(chars[index + 1]) else {
+                    matched = false
+                    break
+                }
+                parts.append(String(chars[index...index + 1]))
+                index += 2
+                if part < 5 {
+                    guard index < chars.count, chars[index] == "-" || chars[index] == ":" else {
+                        matched = false
+                        break
+                    }
+                    index += 1
+                }
+            }
+            if matched { return parts.joined(separator: "-") }
+        }
+        return nil
+    }
 }
 
 @MainActor
@@ -323,34 +337,25 @@ final class PrototypeModel: ObservableObject {
     @Published var network: NetworkState = .offline
     @Published var volume: Double = 0
     @Published var isCharging = false
-    @Published var chargingMinutesRemaining: Int?
-    @Published var lowPowerModeEnabled = false
     @Published var audio: AudioState = .none
     @Published var audioDeviceName = ""
     @Published var outputDevices: [OutputDevice] = []
     @Published var outputDeviceID: AudioDeviceID = kAudioObjectUnknown
+    @Published var bluetoothHeadphoneBatteryLabel: String?
     @Published var isMuted = false
     @Published var lastUpdated = Date()
     @Published var showPercentage = true
     @Published var lastEvent: StatusEvent?
     @Published var metrics = ResourceMetrics()
-    @Published var codexQuota = CodexQuota()
 
     private let networkMonitor = NWPathMonitor()
     private let networkQueue = DispatchQueue(label: "com.local.duo-prototype.network")
-    private var codexQuotaService: CodexQuotaService?
     private var refreshTimer: Timer?
     private var wakeObserver: NSObjectProtocol?
     private var previousCPUTicks: [UInt64] = []
-    private var lastCodexQuotaRefresh = Date.distantPast
 
     init(startMonitoring: Bool = true) {
         if startMonitoring {
-            let service = CodexQuotaService()
-            service.onUpdate = { [weak self] quota in
-                self?.codexQuota = quota
-            }
-            codexQuotaService = service
             self.startMonitoring()
         }
     }
@@ -393,10 +398,6 @@ final class PrototypeModel: ObservableObject {
         readPower()
         readAudio()
         readSystemMetrics()
-        if Date().timeIntervalSince(lastCodexQuotaRefresh) >= 60 {
-            lastCodexQuotaRefresh = Date()
-            codexQuotaService?.refresh()
-        }
         lastUpdated = Date()
 
         if !previousCharging && isCharging {
@@ -460,49 +461,6 @@ final class PrototypeModel: ObservableObject {
         }
         let state = description[kIOPSPowerSourceStateKey] as? String
         isCharging = state == kIOPSACPowerValue && battery < 0.999
-        if isCharging,
-           let minutes = description[kIOPSTimeToFullChargeKey] as? Int,
-           minutes >= 0 {
-            chargingMinutesRemaining = minutes
-        } else {
-            chargingMinutesRemaining = nil
-        }
-        lowPowerModeEnabled = ProcessInfo.processInfo.isLowPowerModeEnabled
-    }
-
-    var chargingEstimateText: String? {
-        guard isCharging else { return nil }
-        guard let minutes = chargingMinutesRemaining else { return "正在估算充满时间…" }
-        if minutes <= 1 { return "即将充满" }
-        let hours = minutes / 60
-        let remainder = minutes % 60
-        if hours > 0 {
-            return remainder > 0 ? "预计还需 \(hours) 小时 \(remainder) 分钟充满" : "预计还需 \(hours) 小时充满"
-        }
-        return "预计还需 \(remainder) 分钟充满"
-    }
-
-    var powerStatusText: String {
-        if let estimate = chargingEstimateText { return "正在充电 · \(estimate)" }
-        return "使用电池"
-    }
-
-    func setLowPowerMode(_ enabled: Bool) {
-        let task = Process()
-        task.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        let value = enabled ? "1" : "0"
-        let script = "do shell script \"/usr/bin/pmset -b lowpowermode \(value)\" with administrator privileges"
-        task.arguments = ["-e", script]
-        task.standardOutput = FileHandle.nullDevice
-        task.standardError = FileHandle.nullDevice
-        do {
-            try task.run()
-            task.waitUntilExit()
-            refresh()
-            if lowPowerModeEnabled != enabled { openBatterySettings() }
-        } catch {
-            openBatterySettings()
-        }
     }
 
     private func readSystemMetrics() {
@@ -576,6 +534,7 @@ final class PrototypeModel: ObservableObject {
             audio = .none
             audioDeviceName = "无输出设备"
             isMuted = false
+            bluetoothHeadphoneBatteryLabel = nil
             return
         }
         if let value = scalarVolume(device) {
@@ -592,6 +551,25 @@ final class PrototypeModel: ObservableObject {
         } else {
             audio = .none
         }
+        let batteryLabel = isBluetoothDevice(device)
+            ? BluetoothHeadphoneBatteryReader.label(forDeviceName: name, address: outputBluetoothAddress(device))
+            : nil
+        if bluetoothHeadphoneBatteryLabel != batteryLabel {
+            bluetoothHeadphoneBatteryLabel = batteryLabel
+        }
+    }
+
+    private func outputBluetoothAddress(_ device: AudioDeviceID) -> String? {
+        var uid: Unmanaged<CFString>?
+        var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceUID,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, &uid) == noErr,
+              let uid else { return nil }
+        return BluetoothHeadphoneBatteryReader.normalizedMACAddress(in: uid.takeUnretainedValue() as String)
     }
 
     private func availableOutputDevices() -> [OutputDevice] {
@@ -775,23 +753,6 @@ final class PrototypeModel: ObservableObject {
         if let url = URL(string: urlString) { NSWorkspace.shared.open(url) }
     }
 
-    func openBatterySettings() {
-        if let url = URL(string: "x-apple.systempreferences:com.apple.Battery-Settings.extension") {
-            NSWorkspace.shared.open(url)
-        }
-    }
-
-    func openCodexUsage() {
-        if let url = URL(string: "https://chatgpt.com/codex/settings/usage") {
-            NSWorkspace.shared.open(url)
-        }
-    }
-
-    func refreshCodexQuota() {
-        lastCodexQuotaRefresh = Date()
-        codexQuotaService?.refresh()
-    }
-
     func toggleLaunchAtLogin(_ enabled: Bool) {
         do {
             if enabled {
@@ -834,7 +795,6 @@ final class PrototypeModel: ObservableObject {
         if let wakeObserver {
             NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
         }
-        codexQuotaService?.stop()
     }
 }
 
@@ -1142,56 +1102,11 @@ struct CompactPanel: View {
             compactRow("网络", model.networkDescription, model.network.symbol) {
                 model.openNetworkSettings()
             }
-            compactRow("电量", model.powerStatusText, model.isCharging ? "bolt.fill" : "battery.100percent") {
-                model.openBatterySettings()
-            }
-
-            HStack(spacing: 10) {
-                Image(systemName: model.lowPowerModeEnabled ? "leaf.fill" : "leaf")
-                    .frame(width: 20)
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("低电量模式").font(.caption).foregroundStyle(.secondary)
-                    Text(model.lowPowerModeEnabled ? "已开启" : "已关闭").font(.subheadline)
-                }
-                Spacer()
-                Toggle("低电量模式", isOn: Binding(
-                    get: { model.lowPowerModeEnabled },
-                    set: { model.setLowPowerMode($0) }
-                ))
-                .labelsHidden()
-                .toggleStyle(.switch)
-            }
-
-            VStack(alignment: .leading, spacing: 8) {
-                Label("Codex 额度", systemImage: "chevron.left.forwardslash.chevron.right")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                HStack(alignment: .center, spacing: 12) {
-                    if let fiveHour = model.codexQuota.fiveHour {
-                        quotaCard(title: "5 小时", centerText: "5", window: fiveHour)
-                    }
-                    if let weekly = model.codexQuota.weekly {
-                        quotaCard(title: "本周", centerText: "all", window: weekly)
-                    }
-                }
-                if model.codexQuota.fiveHour == nil && model.codexQuota.weekly == nil {
-                    Text(model.codexQuota.status)
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                } else if model.codexQuota.status != "已同步" {
-                    Text(model.codexQuota.status)
-                        .font(.caption2)
-                        .foregroundStyle(.tertiary)
-                }
-                HStack(spacing: 10) {
-                    Button("刷新额度") { model.refreshCodexQuota() }
-                        .buttonStyle(.borderless)
-                        .font(.caption)
-                    Button("打开用量页") { model.openCodexUsage() }
-                        .buttonStyle(.borderless)
-                        .font(.caption)
-                }
-            }
+            compactRow(
+                "CPU / 内存",
+                "CPU \(Int(model.metrics.cpuUsage * 100))% · 内存 \(Int(model.metrics.memoryUsage * 100))%",
+                "cpu"
+            )
 
             VStack(alignment: .leading, spacing: 7) {
                 HStack {
@@ -1215,32 +1130,46 @@ struct CompactPanel: View {
                 Label("输出设备", systemImage: model.audio.symbol)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Picker("输出设备", selection: Binding(
-                    get: { model.outputDeviceID },
-                    set: { model.setOutputDevice($0) }
-                )) {
-                    if !model.outputDevices.filter(\.isBluetooth).isEmpty {
-                        Section("蓝牙设备") {
-                            ForEach(model.outputDevices.filter(\.isBluetooth)) { device in
-                                Label(device.name, systemImage: device.symbol)
-                                    .tag(device.id)
+                HStack(spacing: 8) {
+                    Picker("输出设备", selection: Binding(
+                        get: { model.outputDeviceID },
+                        set: { model.setOutputDevice($0) }
+                    )) {
+                        if !model.outputDevices.filter(\.isBluetooth).isEmpty {
+                            Section("蓝牙设备") {
+                                ForEach(model.outputDevices.filter(\.isBluetooth)) { device in
+                                    Label(device.name, systemImage: device.symbol)
+                                        .tag(device.id)
+                                }
                             }
                         }
-                    }
-                    if !model.outputDevices.filter({ !$0.isBluetooth }).isEmpty {
-                        Section("Mac 与其他输出") {
-                            ForEach(model.outputDevices.filter { !$0.isBluetooth }) { device in
-                                Label(device.name, systemImage: device.symbol)
-                                    .tag(device.id)
+                        if !model.outputDevices.filter({ !$0.isBluetooth }).isEmpty {
+                            Section("Mac 与其他输出") {
+                                ForEach(model.outputDevices.filter { !$0.isBluetooth }) { device in
+                                    Label(device.name, systemImage: device.symbol)
+                                        .tag(device.id)
+                                }
                             }
                         }
+                        if model.outputDevices.isEmpty {
+                            Text("没有可用输出设备").tag(kAudioObjectUnknown)
+                        }
                     }
-                    if model.outputDevices.isEmpty {
-                        Text("没有可用输出设备").tag(kAudioObjectUnknown)
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    if let battery = model.bluetoothHeadphoneBatteryLabel {
+                        Spacer(minLength: 8)
+                        HStack(spacing: 4) {
+                            Image(systemName: "battery.100percent")
+                            Text(battery)
+                        }
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                        .lineLimit(1)
+                        .layoutPriority(1)
                     }
                 }
-                .labelsHidden()
-                .pickerStyle(.menu)
                 Text(model.audioDeviceName.isEmpty ? "系统输出" : model.audioDeviceName)
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
@@ -1304,53 +1233,6 @@ struct CompactPanel: View {
                     .foregroundStyle(.secondary)
             }
         }
-    }
-
-    private func quotaCard(title: String, centerText: String, window: CodexQuotaWindow) -> some View {
-        HStack(spacing: 7) {
-            ZStack {
-                QuotaRingShape(progress: 1)
-                    .stroke(.primary.opacity(0.14), style: StrokeStyle(lineWidth: 5, lineCap: .round))
-                QuotaRingShape(progress: Double(window.remainingPercent) / 100)
-                    .stroke(window.remainingPercent <= 15 ? .orange : .accentColor,
-                            style: StrokeStyle(lineWidth: 5, lineCap: .round))
-                Text(centerText)
-                    .font(.system(size: centerText == "all" ? 10 : 15, weight: .bold, design: .rounded))
-                    .monospacedDigit()
-            }
-            .frame(width: 50, height: 50)
-
-            VStack(alignment: .leading, spacing: 1) {
-                Text(title)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Text("剩余 (window.remainingPercent)%")
-                    .font(.caption.weight(.semibold))
-                    .monospacedDigit()
-                Text(window.resetText)
-                    .font(.system(size: 9))
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.65)
-            }
-        }
-        .help(window.resetText)
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-}
-
-private struct QuotaRingShape: Shape {
-    var progress: Double
-
-    func path(in rect: CGRect) -> Path {
-        let inset = 4.0
-        let radius = min(rect.width, rect.height) / 2 - inset
-        let center = CGPoint(x: rect.midX, y: rect.midY)
-        let start = Angle.degrees(-220)
-        let end = start.degrees + 260 * min(max(progress, 0), 1)
-        var path = Path()
-        path.addArc(center: center, radius: radius, startAngle: start, endAngle: .degrees(end), clockwise: false)
-        return path
     }
 }
 
