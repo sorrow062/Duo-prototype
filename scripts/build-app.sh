@@ -1,4 +1,9 @@
 #!/bin/zsh
+# macOS runs this file with zsh (the shebang, and the default shell). Reset to
+# stock zsh semantics so an interactive ~/.zshrc cannot change globbing, then
+# turn the usual safety options back on. In zsh, "(" is a pattern
+# metacharacter even by default and must be quoted inside ${var%pattern}.
+emulate -R zsh
 set -euo pipefail
 
 ROOT_DIR="${0:A:h}/.."
@@ -174,7 +179,10 @@ prepare_swiftpm_binary() {
   fi
   while IFS= read -r line; do
     dep="$(trim_leading_space "$line")"
-    dep="${dep%% (*}"
+    # otool appends " (compatibility version …)". The parenthesis has to stay
+    # quoted: an unquoted "(" is a zsh pattern group and aborts the script with
+    # "bad pattern: (*" before the app bundle is copied into place.
+    dep="${dep%%" ("*}"
     case "$dep" in
       /System/*|/usr/lib/*|/usr/local/lib/*|'')
         continue
