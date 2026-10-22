@@ -18,7 +18,10 @@ let package = Package(
             dependencies: [
                 .product(name: "Sparkle", package: "Sparkle")
             ],
-            path: "Sources/DuoPrototype"
+            path: "Sources/DuoPrototype",
+            linkerSettings: [
+                .linkedFramework("IOBluetooth")
+            ]
         )
     ]
 )

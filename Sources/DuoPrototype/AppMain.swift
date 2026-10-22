@@ -1,6 +1,8 @@
 import AppKit
 import CoreAudio
 import Foundation
+import IOBluetooth
+import IOKit
 import IOKit.ps
 import Network
 import ServiceManagement
@@ -89,6 +91,244 @@ struct OutputDevice: Identifiable, Equatable {
     var symbol: String { isBluetooth ? "dot.radiowaves.left.and.right" : "speaker.wave.2" }
 }
 
+/// Battery for the current Bluetooth output. Left/right come from AirPods-style
+/// readings; `single` is one percentage for headsets that report only one level.
+private struct BluetoothHeadphoneBattery: Equatable {
+    var left: Int?
+    var right: Int?
+    var single: Int?
+
+    var label: String? {
+        switch (left, right, single) {
+        case let (left?, right?, _):
+            return "左 \(left)% · 右 \(right)%"
+        case let (left?, nil, _):
+            return "左 \(left)%"
+        case let (nil, right?, _):
+            return "右 \(right)%"
+        case let (nil, nil, single?):
+            return "\(single)%"
+        default:
+            return nil
+        }
+    }
+}
+
+/// Reads headphone battery for a Core Audio output that is already known to be Bluetooth.
+/// AirPods and Beats expose left/right/single levels on IOBluetoothDevice. Other headsets
+/// usually publish BatteryPercent on AppleDeviceManagementHIDEventService.
+private enum BluetoothHeadphoneBatteryReader {
+    static func label(forDeviceName name: String, address: String?) -> String? {
+        if let label = bluetoothDeviceBattery(name: name, address: address)?.label {
+            return label
+        }
+        return registryBattery(name: name, address: address)?.label
+    }
+
+    private static func bluetoothDeviceBattery(name: String, address: String?) -> BluetoothHeadphoneBattery? {
+        guard let paired = IOBluetoothDevice.pairedDevices() else { return nil }
+        let connected = paired.compactMap { $0 as? IOBluetoothDevice }.filter { $0.isConnected() }
+        guard let matched = bestDevice(in: connected, name: name, address: address) else { return nil }
+        let reading = BluetoothHeadphoneBattery(
+            left: percent(matched, "batteryPercentLeft"),
+            right: percent(matched, "batteryPercentRight"),
+            single: percent(matched, "batteryPercentSingle")
+                ?? percent(matched, "batteryPercentCombined")
+                ?? percent(matched, "headsetBattery")
+        )
+        return reading.label == nil ? nil : reading
+    }
+
+    /// Private IOBluetooth headphone getters. Zero means "no reading" for these fields.
+    private static func percent(_ device: IOBluetoothDevice, _ key: String) -> Int? {
+        let selector = NSSelectorFromString(key)
+        guard device.responds(to: selector) else { return nil }
+        guard let number = device.value(forKey: key) as? NSNumber else { return nil }
+        let value = number.intValue
+        guard (1...100).contains(value) else { return nil }
+        return value
+    }
+
+    private static func registryBattery(name: String, address: String?) -> BluetoothHeadphoneBattery? {
+        let services = ["AppleDeviceManagementHIDEventService", "AppleHSBluetoothDevice"]
+        let candidates = services.flatMap(registryEntries(of:))
+        if let address,
+           let match = candidates.first(where: { macAddressesMatch(address, $0.address) && $0.battery.label != nil }) {
+            return match.battery
+        }
+        return candidates
+            .filter { bluetoothNamesMatch(name, $0.name) && $0.battery.label != nil }
+            .max { lhs, rhs in
+                let audio = normalizeBluetoothName(name)
+                let leftExact = normalizeBluetoothName(lhs.name) == audio
+                let rightExact = normalizeBluetoothName(rhs.name) == audio
+                if leftExact != rightExact { return rightExact }
+                return lhs.name.count < rhs.name.count
+            }?
+            .battery
+    }
+
+    private static func registryEntries(of className: String) -> [(name: String, address: String?, battery: BluetoothHeadphoneBattery)] {
+        var iterator: io_iterator_t = 0
+        guard IOServiceGetMatchingServices(kIOMainPortDefault, IOServiceMatching(className), &iterator) == KERN_SUCCESS else {
+            return []
+        }
+        defer { IOObjectRelease(iterator) }
+
+        var results: [(name: String, address: String?, battery: BluetoothHeadphoneBattery)] = []
+        while case let entry = IOIteratorNext(iterator), entry != 0 {
+            defer { IOObjectRelease(entry) }
+            guard let props = copyRegistryProperties(entry) else { continue }
+            let battery = BluetoothHeadphoneBattery(
+                left: registryPercent(props, "BatteryPercentLeft"),
+                right: registryPercent(props, "BatteryPercentRight"),
+                single: registryPercent(props, "BatteryPercent")
+                    ?? registryPercent(props, "BatteryPercentSingle")
+                    ?? registryPercent(props, "BatteryPercentCombined")
+            )
+            guard battery.label != nil else { continue }
+            let identity = registryIdentity(entry, props: props)
+            results.append((identity.name, identity.address, battery))
+        }
+        return results
+    }
+
+    private static func registryIdentity(_ entry: io_registry_entry_t, props: [String: Any]) -> (name: String, address: String?) {
+        var name = registryName(props) ?? ""
+        var address = registryAddress(props)
+        guard name.isEmpty || address == nil else { return (name, address) }
+
+        var current = entry
+        var owned: io_registry_entry_t = 0
+        defer { if owned != 0 { IOObjectRelease(owned) } }
+        for _ in 0..<4 {
+            var parent: io_registry_entry_t = 0
+            guard IORegistryEntryGetParentEntry(current, kIOServicePlane, &parent) == KERN_SUCCESS, parent != 0 else { break }
+            if owned != 0 { IOObjectRelease(owned) }
+            owned = parent
+            current = parent
+            guard let parentProps = copyRegistryProperties(parent) else { continue }
+            if name.isEmpty, let parentName = registryName(parentProps) { name = parentName }
+            if address == nil { address = registryAddress(parentProps) }
+            if !name.isEmpty, address != nil { break }
+        }
+        return (name, address)
+    }
+
+    private static func copyRegistryProperties(_ entry: io_registry_entry_t) -> [String: Any]? {
+        var properties: Unmanaged<CFMutableDictionary>?
+        guard IORegistryEntryCreateCFProperties(entry, &properties, kCFAllocatorDefault, 0) == KERN_SUCCESS,
+              let properties else { return nil }
+        return properties.takeRetainedValue() as? [String: Any]
+    }
+
+    private static func registryName(_ props: [String: Any]) -> String? {
+        for key in ["Product", "ProductName", "DeviceName", "USB Product Name", "name"] {
+            if let value = props[key] as? String, !value.isEmpty { return value }
+        }
+        return nil
+    }
+
+    private static func registryAddress(_ props: [String: Any]) -> String? {
+        for key in ["BD_ADDR", "DeviceAddress", "Address", "device address"] {
+            if let text = props[key] as? String, let address = normalizedMACAddress(in: text) {
+                return address
+            }
+            if let data = props[key] as? Data, data.count >= 6 {
+                return data.prefix(6).map { String(format: "%02X", $0) }.joined(separator: "-")
+            }
+        }
+        return nil
+    }
+
+    private static func registryPercent(_ props: [String: Any], _ key: String) -> Int? {
+        let raw: Int?
+        switch props[key] {
+        case let value as Int:
+            raw = value
+        case let value as NSNumber:
+            raw = value.intValue
+        case let value as String:
+            raw = Int(value.filter(\.isNumber))
+        default:
+            raw = nil
+        }
+        guard let raw, (1...100).contains(raw) else { return nil }
+        return raw
+    }
+
+    private static func bestDevice(in devices: [IOBluetoothDevice], name: String, address: String?) -> IOBluetoothDevice? {
+        if let address,
+           let match = devices.first(where: { device in
+               let deviceAddress = device.value(forKey: "addressString") as? String ?? ""
+               return macAddressesMatch(address, normalizedMACAddress(in: deviceAddress))
+           }) {
+            return match
+        }
+        return devices
+            .filter { bluetoothNamesMatch(name, $0.value(forKey: "name") as? String ?? "") }
+            .max { lhs, rhs in
+                let audio = normalizeBluetoothName(name)
+                let leftName = normalizeBluetoothName(lhs.value(forKey: "name") as? String ?? "")
+                let rightName = normalizeBluetoothName(rhs.value(forKey: "name") as? String ?? "")
+                let leftExact = leftName == audio
+                let rightExact = rightName == audio
+                if leftExact != rightExact { return rightExact }
+                return leftName.count < rightName.count
+            }
+    }
+
+    private static func bluetoothNamesMatch(_ audioName: String, _ deviceName: String) -> Bool {
+        let audio = normalizeBluetoothName(audioName)
+        let device = normalizeBluetoothName(deviceName)
+        guard audio.count >= 3, device.count >= 3 else { return false }
+        if audio == device { return true }
+        let shorter = min(audio.count, device.count)
+        let longer = max(audio.count, device.count)
+        guard shorter * 2 >= longer else { return false }
+        return audio.contains(device) || device.contains(audio)
+    }
+
+    private static func normalizeBluetoothName(_ value: String) -> String {
+        value.lowercased().filter { $0.isLetter || $0.isNumber }
+    }
+
+    private static func macAddressesMatch(_ lhs: String?, _ rhs: String?) -> Bool {
+        guard let lhs, let rhs else { return false }
+        if lhs == rhs { return true }
+        let reversed = lhs.split(separator: "-").reversed().joined(separator: "-")
+        return reversed == rhs
+    }
+
+    static func normalizedMACAddress(in text: String) -> String? {
+        let chars = Array(text.uppercased())
+        let hex = Set("0123456789ABCDEF")
+        guard chars.count >= 17 else { return nil }
+        for start in 0...(chars.count - 17) {
+            var parts: [String] = []
+            var index = start
+            var matched = true
+            for part in 0..<6 {
+                guard index + 1 < chars.count, hex.contains(chars[index]), hex.contains(chars[index + 1]) else {
+                    matched = false
+                    break
+                }
+                parts.append(String(chars[index...index + 1]))
+                index += 2
+                if part < 5 {
+                    guard index < chars.count, chars[index] == "-" || chars[index] == ":" else {
+                        matched = false
+                        break
+                    }
+                    index += 1
+                }
+            }
+            if matched { return parts.joined(separator: "-") }
+        }
+        return nil
+    }
+}
+
 @MainActor
 final class PrototypeModel: ObservableObject {
     static let shared = PrototypeModel()
@@ -101,6 +341,7 @@ final class PrototypeModel: ObservableObject {
     @Published var audioDeviceName = ""
     @Published var outputDevices: [OutputDevice] = []
     @Published var outputDeviceID: AudioDeviceID = kAudioObjectUnknown
+    @Published var bluetoothHeadphoneBatteryLabel: String?
     @Published var isMuted = false
     @Published var lastUpdated = Date()
     @Published var showPercentage = true
@@ -293,6 +534,7 @@ final class PrototypeModel: ObservableObject {
             audio = .none
             audioDeviceName = "无输出设备"
             isMuted = false
+            bluetoothHeadphoneBatteryLabel = nil
             return
         }
         if let value = scalarVolume(device) {
@@ -309,6 +551,25 @@ final class PrototypeModel: ObservableObject {
         } else {
             audio = .none
         }
+        let batteryLabel = isBluetoothDevice(device)
+            ? BluetoothHeadphoneBatteryReader.label(forDeviceName: name, address: outputBluetoothAddress(device))
+            : nil
+        if bluetoothHeadphoneBatteryLabel != batteryLabel {
+            bluetoothHeadphoneBatteryLabel = batteryLabel
+        }
+    }
+
+    private func outputBluetoothAddress(_ device: AudioDeviceID) -> String? {
+        var uid: Unmanaged<CFString>?
+        var size = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyDeviceUID,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, &uid) == noErr,
+              let uid else { return nil }
+        return BluetoothHeadphoneBatteryReader.normalizedMACAddress(in: uid.takeUnretainedValue() as String)
     }
 
     private func availableOutputDevices() -> [OutputDevice] {
@@ -841,6 +1102,11 @@ struct CompactPanel: View {
             compactRow("网络", model.networkDescription, model.network.symbol) {
                 model.openNetworkSettings()
             }
+            compactRow(
+                "CPU / 内存",
+                "CPU \(Int(model.metrics.cpuUsage * 100))% · 内存 \(Int(model.metrics.memoryUsage * 100))%",
+                "cpu"
+            )
 
             VStack(alignment: .leading, spacing: 7) {
                 HStack {
@@ -864,32 +1130,46 @@ struct CompactPanel: View {
                 Label("输出设备", systemImage: model.audio.symbol)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                Picker("输出设备", selection: Binding(
-                    get: { model.outputDeviceID },
-                    set: { model.setOutputDevice($0) }
-                )) {
-                    if !model.outputDevices.filter(\.isBluetooth).isEmpty {
-                        Section("蓝牙设备") {
-                            ForEach(model.outputDevices.filter(\.isBluetooth)) { device in
-                                Label(device.name, systemImage: device.symbol)
-                                    .tag(device.id)
+                HStack(spacing: 8) {
+                    Picker("输出设备", selection: Binding(
+                        get: { model.outputDeviceID },
+                        set: { model.setOutputDevice($0) }
+                    )) {
+                        if !model.outputDevices.filter(\.isBluetooth).isEmpty {
+                            Section("蓝牙设备") {
+                                ForEach(model.outputDevices.filter(\.isBluetooth)) { device in
+                                    Label(device.name, systemImage: device.symbol)
+                                        .tag(device.id)
+                                }
                             }
                         }
-                    }
-                    if !model.outputDevices.filter({ !$0.isBluetooth }).isEmpty {
-                        Section("Mac 与其他输出") {
-                            ForEach(model.outputDevices.filter { !$0.isBluetooth }) { device in
-                                Label(device.name, systemImage: device.symbol)
-                                    .tag(device.id)
+                        if !model.outputDevices.filter({ !$0.isBluetooth }).isEmpty {
+                            Section("Mac 与其他输出") {
+                                ForEach(model.outputDevices.filter { !$0.isBluetooth }) { device in
+                                    Label(device.name, systemImage: device.symbol)
+                                        .tag(device.id)
+                                }
                             }
                         }
+                        if model.outputDevices.isEmpty {
+                            Text("没有可用输出设备").tag(kAudioObjectUnknown)
+                        }
                     }
-                    if model.outputDevices.isEmpty {
-                        Text("没有可用输出设备").tag(kAudioObjectUnknown)
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    if let battery = model.bluetoothHeadphoneBatteryLabel {
+                        Spacer(minLength: 8)
+                        HStack(spacing: 4) {
+                            Image(systemName: "battery.100percent")
+                            Text(battery)
+                        }
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .monospacedDigit()
+                        .lineLimit(1)
+                        .layoutPriority(1)
                     }
                 }
-                .labelsHidden()
-                .pickerStyle(.menu)
                 Text(model.audioDeviceName.isEmpty ? "系统输出" : model.audioDeviceName)
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
