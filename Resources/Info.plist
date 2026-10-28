@@ -34,5 +34,7 @@
 	<true/>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSBluetoothAlwaysUsageDescription</key>
+	<string>用于在菜单栏面板中读取并显示当前蓝牙耳机的电量。</string>
 </dict>
 </plist>

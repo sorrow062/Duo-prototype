@@ -22,6 +22,26 @@ strip_bundle_metadata() {
   xattr -dr 'com.apple.fileprovider.fpfs#P' "$bundle" 2>/dev/null || true
 }
 
+# codesign refuses to sign or verify a bundle that still has a resource fork,
+# FinderInfo, or AppleDouble files. Those appear when sources live on the
+# Desktop/iCloud, or when the app is copied into /Applications. Clear them
+# immediately before every codesign --force and --verify.
+clear_codesign_detritus() {
+  local target="$1"
+  [[ -e "$target" ]] || return 0
+  if command -v dot_clean >/dev/null 2>&1; then
+    dot_clean -m "$target" >/dev/null 2>&1 || true
+  fi
+  find "$target" \( -name '._*' -o -name '.DS_Store' \) -delete 2>/dev/null || true
+  # -s keeps the clear on the symlink itself. Fall back if this xattr is older.
+  xattr -crs "$target" 2>/dev/null || xattr -cr "$target" 2>/dev/null || true
+  local attr
+  for attr in com.apple.FinderInfo com.apple.ResourceFork com.apple.fileprovider.fpfs#P com.apple.provenance; do
+    xattr -drs "$attr" "$target" 2>/dev/null || xattr -dr "$attr" "$target" 2>/dev/null || true
+  done
+  strip_bundle_metadata "$target"
+}
+
 # Full Xcode provides usr/bin/xcodebuild inside the selected developer
 # directory. Command Line Tools leave xcode-select pointed at
 # /Library/Developer/CommandLineTools, where /usr/bin/xcodebuild only prints
@@ -41,8 +61,9 @@ publish_staged_app() {
   local with_widget="$1"
   local widget_dir="$STAGED_APP/Contents/PlugIns/DuoWidget.appex"
 
-  find "$STAGED_APP" -print0 | xargs -0 -n1 xattr -c 2>/dev/null || true
+  clear_codesign_detritus "$STAGED_APP"
   if [[ "$with_widget" == 1 ]]; then
+    clear_codesign_detritus "$widget_dir"
     codesign --force --sign - --entitlements "$ROOT_DIR/Resources/DuoWidget.entitlements" "$widget_dir" >/dev/null
   fi
   local framework
@@ -51,27 +72,16 @@ publish_staged_app() {
     # Xcode removes development headers when embedding Sparkle's pre-signed
     # framework, which invalidates its original resource seal. Re-sign the
     # embedded framework locally before signing the containing app.
+    clear_codesign_detritus "$framework"
     codesign --force --sign - "$framework" >/dev/null
   done
-  # Signing can restore Finder metadata on the nested bundle; remove it before
-  # signing and verifying the containing application.
-  find "$STAGED_APP" -print0 | xargs -0 -n1 xattr -c 2>/dev/null || true
+  # Signing can restore Finder metadata. Clear it again before signing and
+  # verifying the containing application.
+  clear_codesign_detritus "$STAGED_APP"
   codesign --force --sign - "$STAGED_APP" >/dev/null
+  clear_codesign_detritus "$STAGED_APP"
   if [[ "$with_widget" == 1 ]]; then
-    local package
-    for package in "$STAGED_APP" "$widget_dir"; do
-      xattr -d com.apple.FinderInfo "$package" 2>/dev/null || true
-      xattr -d 'com.apple.fileprovider.fpfs#P' "$package" 2>/dev/null || true
-    done
-  else
-    xattr -d com.apple.FinderInfo "$STAGED_APP" 2>/dev/null || true
-    xattr -d 'com.apple.fileprovider.fpfs#P' "$STAGED_APP" 2>/dev/null || true
-  fi
-  # codesign may restore Finder metadata on nested Sparkle XPC bundles. Remove
-  # all extended attributes recursively so Launch Services can open the final app.
-  xattr -rc "$STAGED_APP" 2>/dev/null || true
-  strip_bundle_metadata "$STAGED_APP"
-  if [[ "$with_widget" == 1 ]]; then
+    clear_codesign_detritus "$widget_dir"
     codesign --verify --strict "$widget_dir"
   fi
   codesign --verify --deep --strict "$STAGED_APP"
@@ -87,8 +97,9 @@ publish_staged_app() {
 
   rm -rf "$APP_DIR"
   ditto --norsrc "$STAGED_APP" "$APP_DIR"
-  xattr -rc "$APP_DIR" 2>/dev/null || true
-  strip_bundle_metadata "$APP_DIR"
+  # The destination may be on the Desktop or iCloud, which reattaches Finder
+  # info while the copy lands. Clear that before the final verify.
+  clear_codesign_detritus "$APP_DIR"
   codesign --verify --deep --strict "$APP_DIR"
   rm -rf "$STAGING_DIR"
 }
@@ -247,13 +258,15 @@ build_with_swiftpm() {
 
   rm -rf "$STAGING_DIR"
   mkdir -p "$STAGED_APP/Contents/MacOS" "$STAGED_APP/Contents/Frameworks"
-  cp -p "$binary" "$STAGED_APP/Contents/MacOS/DuoPrototype"
+  # ditto --norsrc drops resource forks that cp -p would keep from a Desktop copy.
+  ditto --norsrc "$binary" "$STAGED_APP/Contents/MacOS/DuoPrototype"
   chmod 755 "$STAGED_APP/Contents/MacOS/DuoPrototype"
-  cp "$ROOT_DIR/Resources/Info.plist" "$STAGED_APP/Contents/Info.plist"
+  ditto --norsrc "$ROOT_DIR/Resources/Info.plist" "$STAGED_APP/Contents/Info.plist"
   printf 'APPLDUOP' > "$STAGED_APP/Contents/PkgInfo"
+  clear_codesign_detritus "$STAGED_APP"
 
   local key
-  for key in LSUIElement CFBundleIdentifier CFBundleExecutable CFBundleShortVersionString CFBundleVersion; do
+  for key in LSUIElement CFBundleIdentifier CFBundleExecutable CFBundleShortVersionString CFBundleVersion NSBluetoothAlwaysUsageDescription; do
     /usr/libexec/PlistBuddy -c "Print :$key" "$STAGED_APP/Contents/Info.plist" >/dev/null
   done
 
